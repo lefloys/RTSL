@@ -1,0 +1,19 @@
+// This is the actual shader file that gets compiled and used in games.
+// It requires a .rtsli file to define the shader's interface and parameters.
+// This include is so there is one source of truth for the shader's interface, 
+// and to avoid duplication of code.
+
+// This is what rtsl might look like
+
+#include "default.rtsli"
+
+[[vertex]] // v is a raw vertex.
+Vertex main(Vertex v) {
+    
+}
+
+
+[[fragment]]
+vec4 main(Fragment f) {
+    
+}
