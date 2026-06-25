@@ -1,0 +1,57 @@
+
+uniform {
+    mat4 mvp;
+}
+uniform albedo {
+    Sampler2D texture;
+    vec4 tint;
+}
+
+struct Point {
+    vec3 position;
+    vec2 uv;
+};      
+
+
+struct Vertex {
+    Vertex(Point p);
+    vec4 position;
+    vec2 uv;
+    u32 material;
+};
+varying Vertex {
+    clip position;
+    smooth uv;
+    flat material;
+};
+struct Fragment {
+    Fragment(Vertex v);
+    vec4 color;
+};
+
+
+fn Vertex::Vertex(Point p) {
+    f32 z = p.position.z;
+    position = mvp * vec4(p.position, 1.0);
+    uv = p.uv;
+    material = 0;
+}
+fn Fragment::Fragment(Vertex v) {
+    color = sample(albedo::texture, v.uv);
+    color *= albedo::tint;
+}
+
+entry fn vert_main(Point p) -> Vertex {
+    return Vertex(p);
+}
+entry fn frag_main(Vertex v) -> Fragment {
+    return Fragment(v);
+}
+entry fn geom_main(Triangle<Vertex> triangle) -> Geometry<Triangle<Vertex>, 1> {
+    Geometry<Triangle<Vertex>, 1> out;
+    out.emit(triangle);
+    return out;
+}
+
+
+

@@ -1,0 +1,41 @@
+// This struct gets defined by the compiler.
+struct Compute {
+    vec3 group;
+    vec3 local;
+    vec3 global;
+    u32 local_index;
+};
+
+struct Particle {
+    fn step(f32 dt);
+
+    vec3 position;
+    vec3 velocity;
+    f32 lifetime;
+};
+
+uniform particles {
+    readonly Buffer<Particle> src;
+    writeonly Buffer<Particle> dst;
+
+    f32 delta_time;
+    u32 count;
+};
+
+fn Particle::step(f32 dt) {
+    const vec3 gravity = vec3(0.0, -9.81, 0.0);
+
+    velocity += gravity * dt;
+    position += velocity * dt;
+    lifetime -= dt;
+}
+
+fn comp_main(Compute c) {
+    if (c.global.x >= particles::count) {
+        return;
+    }
+
+    Particle p = particles::src[c.global.x];
+    p.integrate(particles::delta_time);
+    particles::dst[c.global.x] = p;
+}

@@ -1,0 +1,92 @@
+/*
+Proposed RTSL stage shapes beyond vertex / fragment / compute / geometry.
+These are illustrative and meant to show how the language may stay consistent.
+*/
+
+struct PatchIn {
+    vec3 position;
+    vec3 normal;
+    vec2 uv;
+};
+
+struct PatchOut {
+    vec3 position;
+    vec3 normal;
+    vec2 uv;
+    f32 tess_factor;
+};
+
+struct MeshTask {
+    u32 meshlet_base;
+    u32 meshlet_count;
+};
+
+struct MeshVertex {
+    vec4 position;
+    vec2 uv;
+    u32 material;
+};
+
+struct RayPayload {
+    vec3 color;
+    u32 depth;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Hit {
+    vec3 normal;
+    f32 alpha;
+};
+
+fn tess_control_main(Patch<PatchIn> patch) -> Patch<PatchOut> {
+    Patch<PatchOut> out;
+    out.position = patch[0].position;
+    out.normal = patch[0].normal;
+    out.uv = patch[0].uv;
+    out.tess_factor = 4.0;
+    return out;
+}
+
+fn tess_eval_main(Patch<PatchOut> patch, vec3 bary) -> Vertex {
+    Vertex out;
+    out.position = vec4(patch[0].position, 1.0);
+    out.uv = patch[0].uv;
+    out.material = 0;
+    return out;
+}
+
+fn task_main(Compute c) -> MeshTask {
+    MeshTask task;
+    task.meshlet_base = c.global.x * 8;
+    task.meshlet_count = 8;
+    return task;
+}
+
+fn mesh_main(MeshTask task) -> Mesh<64, 126, MeshVertex> {
+    Mesh<64, 126, MeshVertex> out;
+    return out;
+}
+
+entry fn raygen_main(Compute c) {
+    Ray ray;
+    ray.origin = vec3(0.0, 0.0, 0.0);
+    ray.direction = vec3(0.0, 0.0, 1.0);
+
+    RayPayload payload;
+    payload.color = vec3(0.0);
+    payload.depth = 0;
+
+    trace(ray, payload);
+}
+
+entry fn miss_main(inout RayPayload payload) {
+    payload.color = vec3(0.1, 0.2, 0.4);
+}
+
+entry fn closest_hit_main(inout RayPayload payload, Hit hit) {
+    payload.color = hit.normal * 0.5 + 0.5;
+}
