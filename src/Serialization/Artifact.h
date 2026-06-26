@@ -1,0 +1,36 @@
+#pragma once
+
+#include "Basic/Diagnostics.h"
+#include "IR/IR.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <vector>
+
+namespace rtsl {
+
+enum class ArtifactKind : u16 {
+    object = 1,
+    module = 2,
+    library = 3,
+    program = 4,
+};
+
+struct Artifact {
+    ArtifactKind kind = ArtifactKind::object;
+    std::vector<std::string> strings;
+    std::vector<StructDecl> structs;
+    std::vector<UniformBinding> uniforms;
+    std::vector<IRFunction> functions;
+    std::vector<IRFunctionDebugInfo> function_debug;
+    std::vector<u8> bytes;
+};
+
+[[nodiscard]] std::vector<u8> write_artifact(ArtifactKind kind, const IRModule &module);
+[[nodiscard]] std::vector<u8> write_linked_program(std::span<const Artifact> inputs);
+[[nodiscard]] bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngine *diagnostics = nullptr);
+[[nodiscard]] const char *artifact_extension(ArtifactKind kind);
+
+} // namespace rtsl
