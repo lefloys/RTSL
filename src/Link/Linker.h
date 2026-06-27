@@ -16,6 +16,9 @@ public:
     [[nodiscard]] Artifact link_program();
 
 private:
+    // Diagnose missing or conflicting stage entry points for a linked program.
+    void validate_program_stages(const Artifact &program);
+
     DiagnosticEngine &diagnostics_;
     std::vector<Artifact> inputs_;
 };

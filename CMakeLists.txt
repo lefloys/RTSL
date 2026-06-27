@@ -9,9 +9,12 @@ set(RTSL_LIBRARY_SOURCES
     src/Parse/Parser.cpp
     src/Sema/Sema.cpp
     src/IR/IR.cpp
+    src/IR/UniformLowering.cpp
+    src/IR/StageBuiltins.cpp
     src/Mangle/Mangler.cpp
     src/Serialization/Artifact.cpp
     src/Serialization/TextRTIR.cpp
+    src/Backend/GlslBackend.cpp
     src/Compiler/Compiler.cpp
     src/Link/Linker.cpp
     src/rtsl.cpp
@@ -58,3 +61,20 @@ set_target_properties(rtsl-tests PROPERTIES
 
 enable_testing()
 add_test(NAME rtsl-tests COMMAND rtsl-tests)
+
+# End-to-end check: compile a representative shader and run the emitted GLSL
+# through glslangValidator so that an undeclared identifier, GLSL reserved
+# word, or invalid layout in the backend output fails CI rather than silently
+# producing broken .vert/.frag files. Skipped when glslangValidator is not on
+# PATH (e.g. machines without the Vulkan SDK).
+find_program(GLSLANG_VALIDATOR glslangValidator)
+if(GLSLANG_VALIDATOR)
+    set(_e2e_out ${CMAKE_CURRENT_BINARY_DIR}/glsl-e2e)
+    add_test(NAME glsl-e2e
+        COMMAND ${CMAKE_COMMAND}
+            -DRTSLC=$<TARGET_FILE:rtslc>
+            -DGLSLANG=${GLSLANG_VALIDATOR}
+            -DSHADER=${CMAKE_CURRENT_SOURCE_DIR}/workspace/graphics.rtsl
+            -DOUTDIR=${_e2e_out}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunGlslE2E.cmake)
+endif()

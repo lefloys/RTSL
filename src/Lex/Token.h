@@ -15,7 +15,6 @@ namespace rtsl {
     X(Using, "using") \
     X(Uniform, "uniform") \
     X(Varying, "varying") \
-    X(Entry, "entry") \
     X(Function, "fn") \
     X(Const, "const") \
     X(Auto, "auto") \
@@ -33,7 +32,36 @@ namespace rtsl {
     X(WriteOnly, "writeonly") \
     X(True, "true") \
     X(False, "false") \
-    X(InOut, "inout")
+    X(InOut, "inout") \
+    X(Input, "input") \
+    X(Output, "output") \
+    X(Location, "location") \
+    X(Builtin, "builtin")
+
+#define RTSL_PUNCTUATION_TOKENS(X) \
+    X(plus, '+') \
+    X(minus, '-') \
+    X(star, '*') \
+    X(slash, '/') \
+    X(percent, '%') \
+    X(equal, '=') \
+    X(less, '<') \
+    X(greater, '>') \
+    X(bang, '!') \
+    X(amp, '&') \
+    X(pipe, '|') \
+    X(caret, '^') \
+    X(tilde, '~') \
+    X(left_paren, '(') \
+    X(right_paren, ')') \
+    X(left_brace, '{') \
+    X(right_brace, '}') \
+    X(left_bracket, '[') \
+    X(right_bracket, ']') \
+    X(comma, ',') \
+    X(semicolon, ';') \
+    X(dot, '.') \
+    X(colon, ':')
 
 enum class TokenKind : u16 {
     invalid,
@@ -41,42 +69,23 @@ enum class TokenKind : u16 {
     identifier,
     integer_literal,
     float_literal,
-    string_literal,
 
 #define RTSL_KEYWORD_ENUM(name, spelling) kw_##name,
     RTSL_KEYWORD_TOKENS(RTSL_KEYWORD_ENUM)
 #undef RTSL_KEYWORD_ENUM
 
-    plus,
-    minus,
-    star,
-    slash,
-    percent,
-    equal,
     equal_equal,
     bang_equal,
-    less,
     less_equal,
-    greater,
     greater_equal,
-    bang,
     amp_amp,
     pipe_pipe,
-    amp,
-    pipe,
-    caret,
-    tilde,
     arrow,
     colon_colon,
-    left_paren,
-    right_paren,
-    left_brace,
-    right_brace,
-    left_bracket,
-    right_bracket,
-    comma,
-    semicolon,
-    dot,
+
+#define RTSL_PUNCTUATION_ENUM(name, spelling) name,
+    RTSL_PUNCTUATION_TOKENS(RTSL_PUNCTUATION_ENUM)
+#undef RTSL_PUNCTUATION_ENUM
 };
 
 struct Token {

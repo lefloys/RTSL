@@ -41,33 +41,33 @@ bool Parser::at_end() const {
 
 Decl Parser::parse_declaration() {
     bool exported = consume(TokenKind::kw_Export);
-    bool entry = consume(TokenKind::kw_Entry);
 
     if (at(TokenKind::kw_Import)) {
         return parse_import(exported);
     }
     if (at(TokenKind::kw_Function)) {
-        return parse_named_declaration(DeclKind::function, exported, entry);
+        return parse_named_declaration(DeclKind::function, exported);
     }
     if (at(TokenKind::kw_Struct)) {
-        auto decl = parse_named_declaration(DeclKind::struct_decl, exported, entry);
+        auto decl = parse_named_declaration(DeclKind::struct_decl, exported);
         return decl;
     }
     if (at(TokenKind::kw_Uniform)) {
-        return parse_named_declaration(DeclKind::uniform, exported, entry);
+        return parse_named_declaration(DeclKind::uniform, exported);
     }
     if (at(TokenKind::kw_Varying)) {
-        return parse_named_declaration(DeclKind::varying, exported, entry);
+        return parse_named_declaration(DeclKind::varying, exported);
+    }
+    if (at(TokenKind::kw_Input)) {
+        return parse_named_declaration(DeclKind::input, exported);
+    }
+    if (at(TokenKind::kw_Output)) {
+        return parse_named_declaration(DeclKind::output, exported);
     }
     if (at(TokenKind::kw_Namespace)) {
-        return parse_named_declaration(DeclKind::namespace_decl, exported, entry);
+        return parse_named_declaration(DeclKind::namespace_decl, exported);
     }
-
-    if (entry) {
-        diagnose(peek(), "expected function declaration after 'entry'");
-    } else {
-        diagnose(peek(), "unsupported top-level declaration");
-    }
+    diagnose(peek(), "unsupported top-level declaration");
     skip_to_declaration_boundary();
     return {};
 }
@@ -98,7 +98,7 @@ Decl Parser::parse_import(bool exported) {
     return Decl{.kind = DeclKind::import, .name = std::move(name), .span = start.span, .exported = exported};
 }
 
-Decl Parser::parse_named_declaration(DeclKind kind, bool exported, bool entry) {
+Decl Parser::parse_named_declaration(DeclKind kind, bool exported) {
     const Token start = peek();
     ++cursor_;
 
@@ -129,14 +129,44 @@ Decl Parser::parse_named_declaration(DeclKind kind, bool exported, bool entry) {
         diagnose(peek(), "expected declaration name");
     }
 
-    Decl decl{.kind = kind, .name = std::move(name), .span = start.span, .exported = exported, .entry = entry};
+    Decl decl{.kind = kind, .name = std::move(name), .span = start.span, .exported = exported};
     if (kind == DeclKind::function) {
         parse_function_signature(decl);
+        if (const auto owner_end = decl.name.find("::");
+            owner_end != std::string::npos && decl.name.substr(owner_end + 2) == decl.name.substr(0, owner_end) &&
+            decl.return_type != "void") {
+            diagnose(peek(), "constructors must not specify a return type");
+        }
         parse_function_body(decl);
     } else if (kind == DeclKind::struct_decl) {
         StructDecl struct_decl{.name = decl.name};
         if (consume(TokenKind::left_brace)) {
             while (!at_end() && !at(TokenKind::right_brace)) {
+                if (at(TokenKind::kw_Function)) {
+                    ++cursor_;
+                    if (!at(TokenKind::identifier)) {
+                        diagnose(peek(), "expected constructor name");
+                        skip_to_declaration_boundary();
+                        continue;
+                    }
+                    const std::string ctor_name = std::string(peek().text);
+                    ++cursor_;
+                    if (ctor_name != decl.name) {
+                        diagnose(peek(), "expected constructor declaration");
+                        skip_to_declaration_boundary();
+                        continue;
+                    }
+                    Decl ctor{.kind = DeclKind::function, .name = decl.name + "::" + decl.name, .span = start.span, .exported = exported};
+                    parse_function_signature(ctor);
+                    if (ctor.return_type != "void") {
+                        diagnose(peek(), "constructor declarations must not specify a return type");
+                    }
+                    if (!consume(TokenKind::semicolon)) {
+                        diagnose(peek(), "expected ';' after constructor declaration");
+                    }
+                    struct_decl.constructor_parameters = ctor.parameters;
+                    continue;
+                }
                 auto field = parse_field_declaration();
                 if (!field.type.empty() && !field.name.empty()) {
                     struct_decl.fields.push_back(std::move(field));
@@ -152,6 +182,8 @@ Decl Parser::parse_named_declaration(DeclKind kind, bool exported, bool entry) {
         }
     } else if (kind == DeclKind::uniform) {
         parse_uniform_scope(decl);
+    } else if (kind == DeclKind::varying || kind == DeclKind::input || kind == DeclKind::output) {
+        parse_stage_interface(decl);
     } else {
         skip_balanced_block();
     }
@@ -213,6 +245,85 @@ void Parser::parse_uniform_scope(const Decl &decl) {
 
     const bool consumed_uniform_end = consume(TokenKind::right_brace);
     (void)consumed_uniform_end;
+}
+
+void Parser::parse_stage_interface(const Decl &decl) {
+    StageRole role = StageRole::varying;
+    if (decl.kind == DeclKind::input) {
+        role = StageRole::input;
+    } else if (decl.kind == DeclKind::output) {
+        role = StageRole::output;
+    }
+
+    StageInterface interface{.role = role, .type_name = decl.name};
+
+    if (!consume(TokenKind::left_brace)) {
+        return;
+    }
+
+    while (!at_end() && !at(TokenKind::right_brace)) {
+        StageIOField field;
+
+        // Field qualifiers may appear in any order before the field name.
+        bool consuming_qualifiers = true;
+        while (consuming_qualifiers && !at_end()) {
+            if (consume(TokenKind::kw_Smooth)) {
+                field.interpolation = "smooth";
+            } else if (consume(TokenKind::kw_Flat)) {
+                field.interpolation = "flat";
+            } else if (consume(TokenKind::kw_Clip)) {
+                // A clip-space position is delivered through the rasterizer's
+                // built-in position slot rather than a user location.
+                field.interpolation = "clip";
+                if (field.builtin.empty()) {
+                    field.builtin = "position";
+                }
+            } else if (consume(TokenKind::kw_Location)) {
+                if (consume(TokenKind::left_paren) && at(TokenKind::integer_literal)) {
+                    field.location = static_cast<u32>(std::stoul(std::string(peek().text)));
+                    field.has_location = true;
+                    ++cursor_;
+                    if (!consume(TokenKind::right_paren)) {
+                        diagnose(peek(), "expected ')' after location index");
+                    }
+                } else {
+                    diagnose(peek(), "expected '(' index ')' after 'location'");
+                }
+            } else if (consume(TokenKind::kw_Builtin)) {
+                if (consume(TokenKind::left_paren) && at(TokenKind::identifier)) {
+                    field.builtin = std::string(peek().text);
+                    ++cursor_;
+                    if (!consume(TokenKind::right_paren)) {
+                        diagnose(peek(), "expected ')' after builtin name");
+                    }
+                } else {
+                    diagnose(peek(), "expected '(' name ')' after 'builtin'");
+                }
+            } else {
+                consuming_qualifiers = false;
+            }
+        }
+
+        if (at(TokenKind::identifier)) {
+            field.name = std::string(peek().text);
+            ++cursor_;
+            if (consume(TokenKind::semicolon)) {
+                interface.fields.push_back(std::move(field));
+                continue;
+            }
+            diagnose(peek(), "expected ';' after stage interface field");
+        } else {
+            diagnose(peek(), "expected stage interface field name");
+        }
+        skip_to_declaration_boundary();
+    }
+
+    const bool consumed_end = consume(TokenKind::right_brace);
+    (void)consumed_end;
+
+    if (unit_ && !interface.type_name.empty()) {
+        unit_->stage_interfaces.push_back(std::move(interface));
+    }
 }
 
 StructField Parser::parse_field_declaration() {
@@ -323,12 +434,28 @@ void Parser::parse_function_signature(Decl &decl) {
                 param_name = std::string(parameter_tokens.back().text);
                 parameter_tokens.pop_back();
             }
+            // Parameters may be passed by reference: `const Type& name`. The
+            // const/& qualifiers are stripped from the recorded type; reference
+            // semantics are intrinsic to builtin carrier types (e.g. RtVertex).
+            bool is_const = false;
+            bool is_reference = false;
             std::string param_type;
             for (const auto &token : parameter_tokens) {
-                param_type += std::string(token.text);
+                if (token.kind == TokenKind::kw_Const) {
+                    is_const = true;
+                } else if (token.kind == TokenKind::amp) {
+                    is_reference = true;
+                } else {
+                    param_type += std::string(token.text);
+                }
             }
             if (!param_type.empty()) {
-                decl.parameters.push_back(ParameterDecl{.type = std::move(param_type), .name = std::move(param_name)});
+                decl.parameters.push_back(ParameterDecl{
+                    .type = std::move(param_type),
+                    .name = std::move(param_name),
+                    .is_const = is_const,
+                    .is_reference = is_reference,
+                });
             }
         }
 
@@ -368,11 +495,11 @@ std::string Parser::collect_type_until(TokenKind stop_a, TokenKind stop_b) {
     return text;
 }
 
-void Parser::skip_to_declaration_boundary() {
+void Parser::skip_to_declaration_boundary(bool consume_right_brace) {
     while (!at_end() && !at(TokenKind::semicolon) && !at(TokenKind::right_brace)) {
         ++cursor_;
     }
-    if (at(TokenKind::semicolon)) {
+    if (at(TokenKind::semicolon) || (consume_right_brace && at(TokenKind::right_brace))) {
         ++cursor_;
     }
 }
@@ -408,7 +535,7 @@ std::string Parser::append_token_text(std::string statement, const Token &token)
         const bool next_ident = token.kind == TokenKind::identifier ||
                                 token.kind == TokenKind::integer_literal ||
                                 token.kind == TokenKind::float_literal ||
-                                (token.kind >= TokenKind::kw_Import && token.kind <= TokenKind::kw_InOut);
+                                (token.kind >= TokenKind::kw_Import && token.kind <= TokenKind::kw_Builtin);
         if (last_ident && next_ident) {
             statement.push_back(' ');
         }

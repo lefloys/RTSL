@@ -5,6 +5,7 @@
 #include "Serialization/Artifact.h"
 
 #include <string>
+#include <string_view>
 
 namespace rtsl {
 
@@ -14,7 +15,8 @@ struct CompilerInvocation {
 
 class CompilerInstance {
 public:
-    [[nodiscard]] Artifact compile_source(std::string source, CompilerInvocation invocation = {});
+    [[nodiscard]] Artifact compile_source(std::string_view source, CompilerInvocation invocation = {});
+    void compile_source_to(Artifact& artifact, std::string_view source, CompilerInvocation invocation = {});
 
     [[nodiscard]] DiagnosticEngine &diagnostics() { return diagnostics_; }
     [[nodiscard]] SourceManager &sources() { return sources_; }

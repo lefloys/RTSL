@@ -20,10 +20,9 @@ enum class SectionKind : u32 {
     symbol_table = 3,
     function_table = 4,
     debug_table = 5,
-    entry_table = 6,
     struct_table = 7,
-    function_debug_table = 8,
     uniform_table = 9,
+    stage_interface_table = 10,
 };
 
 struct Section {
@@ -99,11 +98,13 @@ Section make_function_table(const IRModule &module) {
     for (std::size_t i = 0; i < module.functions.size(); ++i) {
         append_u32(section.bytes, static_cast<u32>(1 + i * 2));
         append_u32(section.bytes, static_cast<u32>(2 + i * 2));
-        append_u8(section.bytes, module.functions[i].entry ? 1 : 0);
+        append_u8(section.bytes, static_cast<u8>(module.functions[i].stage));
+        append_u8(section.bytes, module.functions[i].generated ? 1 : 0);
         append_string(section.bytes, module.functions[i].return_type.empty() ? "void" : module.functions[i].return_type);
         append_u32(section.bytes, static_cast<u32>(module.functions[i].parameters.size()));
         for (const auto &parameter : module.functions[i].parameters) {
             append_string(section.bytes, parameter.type);
+            append_string(section.bytes, parameter.name);
         }
         // Function bodies must not be serialized as source text. This placeholder
         // keeps the section version stable until structured statement IR lands.
@@ -119,19 +120,6 @@ Section make_function_table(const IRModule &module) {
                 append_string(section.bytes, arg);
             }
             append_string(section.bytes, op.value);
-        }
-    }
-    return section;
-}
-
-Section make_function_debug_table(const IRModule &module) {
-    Section section{.kind = SectionKind::function_debug_table};
-    append_u32(section.bytes, static_cast<u32>(module.function_debug.size()));
-    for (const auto &debug : module.function_debug) {
-        append_string(section.bytes, debug.display_name);
-        append_u32(section.bytes, static_cast<u32>(debug.parameter_names.size()));
-        for (const auto &name : debug.parameter_names) {
-            append_string(section.bytes, name);
         }
     }
     return section;
@@ -170,18 +158,19 @@ Section make_uniform_table(const IRModule &module) {
     return section;
 }
 
-Section make_entry_table(const IRModule &module) {
-    Section section{.kind = SectionKind::entry_table};
-    u32 count = 0;
-    for (const auto &function : module.functions) {
-        if (function.entry) {
-            ++count;
-        }
-    }
-    append_u32(section.bytes, count);
-    for (std::size_t i = 0; i < module.functions.size(); ++i) {
-        if (module.functions[i].entry) {
-            append_u32(section.bytes, static_cast<u32>(i));
+Section make_stage_interface_table(const IRModule &module) {
+    Section section{.kind = SectionKind::stage_interface_table};
+    append_u32(section.bytes, static_cast<u32>(module.stage_interfaces.size()));
+    for (const auto &interface : module.stage_interfaces) {
+        append_u8(section.bytes, static_cast<u8>(interface.role));
+        append_string(section.bytes, interface.type_name);
+        append_u32(section.bytes, static_cast<u32>(interface.fields.size()));
+        for (const auto &field : interface.fields) {
+            append_string(section.bytes, field.name);
+            append_string(section.bytes, field.interpolation);
+            append_string(section.bytes, field.builtin);
+            append_u8(section.bytes, field.has_location ? 1 : 0);
+            append_u32(section.bytes, field.location);
         }
     }
     return section;
@@ -244,13 +233,14 @@ std::vector<u8> write_artifact(ArtifactKind kind, const IRModule &module) {
     sections.push_back(make_empty_section(SectionKind::symbol_table));
     sections.push_back(make_struct_table(module));
     sections.push_back(make_uniform_table(module));
+    sections.push_back(make_stage_interface_table(module));
     sections.push_back(make_function_table(module));
     sections.push_back(make_empty_section(SectionKind::debug_table));
-    sections.push_back(make_function_debug_table(module));
-    if (kind == ArtifactKind::program) {
-        sections.push_back(make_entry_table(module));
-    }
     return write_container(kind, std::move(sections));
+}
+
+std::vector<u8> write_debug_artifact(const IRModule &module) {
+    return write_container(ArtifactKind::object, {});
 }
 
 std::vector<u8> write_linked_program(std::span<const Artifact> inputs) {
@@ -262,11 +252,11 @@ std::vector<u8> write_linked_program(std::span<const Artifact> inputs) {
         for (const auto &uniform : input.uniforms) {
             module.uniforms.push_back(uniform);
         }
+        for (const auto &interface : input.stage_interfaces) {
+            module.stage_interfaces.push_back(interface);
+        }
         for (const auto &function : input.functions) {
             module.functions.push_back(function);
-        }
-        for (const auto &debug : input.function_debug) {
-            module.function_debug.push_back(debug);
         }
     }
     return write_artifact(ArtifactKind::program, module);
@@ -311,7 +301,7 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
     std::vector<u8> struct_section;
     std::vector<u8> uniform_section;
     std::vector<u8> function_section;
-    std::vector<u8> function_debug_section;
+    std::vector<u8> stage_interface_section;
     for (u32 i = 0; i < section_count; ++i) {
         const auto entry = static_cast<std::size_t>(section_table_offset + i * SectionEntrySize);
         const auto section_kind = static_cast<SectionKind>(read_u32(data, entry));
@@ -329,13 +319,13 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
             auto section = data.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
             struct_section.assign(section.begin(), section.end());
         }
-        if (section_kind == SectionKind::function_debug_table) {
-            auto section = data.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
-            function_debug_section.assign(section.begin(), section.end());
-        }
         if (section_kind == SectionKind::uniform_table) {
             auto section = data.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
             uniform_section.assign(section.begin(), section.end());
+        }
+        if (section_kind == SectionKind::stage_interface_table) {
+            auto section = data.subspan(static_cast<std::size_t>(offset), static_cast<std::size_t>(size));
+            stage_interface_section.assign(section.begin(), section.end());
         }
         if (section_kind != SectionKind::string_table) {
             continue;
@@ -428,7 +418,7 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
         const auto count = read_u32(section, 0);
         std::size_t cursor = 4;
         for (u32 function_index = 0; function_index < count; ++function_index) {
-            if (cursor + 13 > section.size()) {
+            if (cursor + 14 > section.size()) {
                 report_read_error(diagnostics, "function table entry is truncated");
                 return false;
             }
@@ -436,7 +426,8 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
             cursor += 4;
             const auto symbol_string_id = read_u32(section, cursor);
             cursor += 4;
-            const bool entry = section[cursor++] != 0;
+            const auto stage = static_cast<StageKind>(section[cursor++]);
+            const bool generated = section[cursor++] != 0;
             if (display_string_id >= artifact.strings.size() || symbol_string_id >= artifact.strings.size()) {
                 report_read_error(diagnostics, "function table references an invalid string");
                 return false;
@@ -465,7 +456,19 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
                 }
                 std::string parameter_type(reinterpret_cast<const char *>(section.data() + cursor), parameter_length);
                 cursor += parameter_length;
-                parameters.push_back(ParameterDecl{.type = std::move(parameter_type)});
+                if (cursor + 4 > section.size()) {
+                    report_read_error(diagnostics, "function parameter name is truncated");
+                    return false;
+                }
+                const auto parameter_name_length = read_u32(section, cursor);
+                cursor += 4;
+                if (cursor + parameter_name_length > section.size()) {
+                    report_read_error(diagnostics, "function parameter name payload is truncated");
+                    return false;
+                }
+                std::string parameter_name(reinterpret_cast<const char *>(section.data() + cursor), parameter_name_length);
+                cursor += parameter_name_length;
+                parameters.push_back(ParameterDecl{.type = std::move(parameter_type), .name = std::move(parameter_name)});
             }
             if (cursor + 4 > section.size()) {
                 report_read_error(diagnostics, "function body table is truncated");
@@ -510,7 +513,8 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
                 .parameters = std::move(parameters),
                 .return_type = std::move(return_type),
                 .body_ops = std::move(body_ops),
-                .entry = entry,
+                .stage = stage,
+                .generated = generated,
             });
         }
     }
@@ -567,45 +571,60 @@ bool read_artifact(std::span<const u8> data, Artifact &artifact, DiagnosticEngin
             artifact.uniforms.push_back(std::move(uniform));
         }
     }
-    if (!function_debug_section.empty()) {
-        std::span<const u8> section(function_debug_section);
+    if (!stage_interface_section.empty()) {
+        std::span<const u8> section(stage_interface_section);
         if (section.size() < 4) {
-            report_read_error(diagnostics, "function debug table is truncated");
+            report_read_error(diagnostics, "stage interface table is truncated");
             return false;
         }
         const auto count = read_u32(section, 0);
         std::size_t cursor = 4;
-        for (u32 function_index = 0; function_index < count; ++function_index) {
-            if (cursor + 8 > section.size()) {
-                report_read_error(diagnostics, "function debug entry is truncated");
+        auto read_string = [&]() -> std::optional<std::string> {
+            if (cursor + 4 > section.size()) {
+                return std::nullopt;
+            }
+            const auto length = read_u32(section, cursor);
+            cursor += 4;
+            if (cursor + length > section.size()) {
+                return std::nullopt;
+            }
+            std::string value(reinterpret_cast<const char *>(section.data() + cursor), length);
+            cursor += length;
+            return value;
+        };
+        for (u32 interface_index = 0; interface_index < count; ++interface_index) {
+            if (cursor + 1 > section.size()) {
+                report_read_error(diagnostics, "stage interface entry is truncated");
                 return false;
             }
-            const auto display_name_length = read_u32(section, cursor);
-            cursor += 4;
-            if (cursor + display_name_length + 4 > section.size()) {
-                report_read_error(diagnostics, "function debug display name is truncated");
+            StageInterface interface;
+            interface.role = static_cast<StageRole>(section[cursor++]);
+            auto type_name = read_string();
+            if (!type_name || cursor + 4 > section.size()) {
+                report_read_error(diagnostics, "stage interface type is truncated");
                 return false;
             }
-            IRFunctionDebugInfo debug;
-            debug.display_name = std::string(reinterpret_cast<const char *>(section.data() + cursor), display_name_length);
-            cursor += display_name_length;
-            const auto parameter_name_count = read_u32(section, cursor);
+            interface.type_name = std::move(*type_name);
+            const auto field_count = read_u32(section, cursor);
             cursor += 4;
-            for (u32 parameter_index = 0; parameter_index < parameter_name_count; ++parameter_index) {
-                if (cursor + 4 > section.size()) {
-                    report_read_error(diagnostics, "function debug parameter name is truncated");
+            for (u32 field_index = 0; field_index < field_count; ++field_index) {
+                auto name = read_string();
+                auto interpolation = read_string();
+                auto builtin = read_string();
+                if (!name || !interpolation || !builtin || cursor + 5 > section.size()) {
+                    report_read_error(diagnostics, "stage interface field is truncated");
                     return false;
                 }
-                const auto name_length = read_u32(section, cursor);
+                StageIOField field;
+                field.name = std::move(*name);
+                field.interpolation = std::move(*interpolation);
+                field.builtin = std::move(*builtin);
+                field.has_location = section[cursor++] != 0;
+                field.location = read_u32(section, cursor);
                 cursor += 4;
-                if (cursor + name_length > section.size()) {
-                    report_read_error(diagnostics, "function debug parameter name payload is truncated");
-                    return false;
-                }
-                debug.parameter_names.emplace_back(reinterpret_cast<const char *>(section.data() + cursor), name_length);
-                cursor += name_length;
+                interface.fields.push_back(std::move(field));
             }
-            artifact.function_debug.push_back(std::move(debug));
+            artifact.stage_interfaces.push_back(std::move(interface));
         }
     }
     return true;
@@ -619,6 +638,10 @@ const char *artifact_extension(ArtifactKind kind) {
     case ArtifactKind::program: return ".rtslp";
     }
     return ".rtslbin";
+}
+
+const char *debug_artifact_extension() {
+    return ".rtsld";
 }
 
 } // namespace rtsl

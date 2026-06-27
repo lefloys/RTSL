@@ -1,15 +1,102 @@
 #include "rtsl.h"
 
 #include "Compiler/Compiler.h"
+#include "IR/UniformLowering.h"
 #include "Link/Linker.h"
+#include "Serialization/Artifact.h"
 
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+
+namespace {
+
+rtsl_stage to_c_stage(rtsl::StageKind stage) {
+    switch (stage) {
+    case rtsl::StageKind::vertex: return RTSL_STAGE_VERTEX;
+    case rtsl::StageKind::fragment: return RTSL_STAGE_FRAGMENT;
+    case rtsl::StageKind::compute: return RTSL_STAGE_COMPUTE;
+    case rtsl::StageKind::none: return RTSL_STAGE_NONE;
+    }
+    return RTSL_STAGE_NONE;
+}
+
+rtsl_stage_role to_c_role(rtsl::StageRole role) {
+    switch (role) {
+    case rtsl::StageRole::input: return RTSL_STAGE_ROLE_INPUT;
+    case rtsl::StageRole::varying: return RTSL_STAGE_ROLE_VARYING;
+    case rtsl::StageRole::output: return RTSL_STAGE_ROLE_OUTPUT;
+    }
+    return RTSL_STAGE_ROLE_VARYING;
+}
+
+} // namespace
 
 struct rtsl_module_t {
     rtsl::Artifact artifact;
+
+    // Reflection views cached on first query. The backing strings live in the
+    // artifact (or in owned_strings), so the const char* fields stay valid for
+    // the lifetime of the module.
+    std::vector<std::string> owned_strings;
+    std::vector<rtsl_uniform_info> uniform_views;
+    std::vector<rtsl_stage_variable> stage_views;
+    std::vector<rtsl_entry_info> entry_views;
+    bool reflection_built = false;
+
+    void ensure_reflection() {
+        if (reflection_built) {
+            return;
+        }
+        reflection_built = true;
+
+        // Computed binding names need stable storage; reserve so the vector
+        // never reallocates while we capture pointers into it.
+        owned_strings.reserve(artifact.uniforms.size());
+        for (const auto &uniform : artifact.uniforms) {
+            owned_strings.push_back(rtsl::uniform_binding_name(uniform));
+        }
+        uniform_views.reserve(artifact.uniforms.size());
+        for (std::size_t i = 0; i < artifact.uniforms.size(); ++i) {
+            const auto &uniform = artifact.uniforms[i];
+            uniform_views.push_back(rtsl_uniform_info{
+                .scope_name = uniform.scope_name.c_str(),
+                .name = uniform.name.c_str(),
+                .type = uniform.type.c_str(),
+                .binding_name = owned_strings[i].c_str(),
+                .set = uniform.set,
+                .binding = uniform.binding,
+                .is_resource = rtsl::is_resource_uniform_type(uniform.type) ? 1 : 0,
+            });
+        }
+
+        for (const auto &interface : artifact.stage_interfaces) {
+            for (const auto &field : interface.fields) {
+                stage_views.push_back(rtsl_stage_variable{
+                    .role = to_c_role(interface.role),
+                    .payload_type = interface.type_name.c_str(),
+                    .name = field.name.c_str(),
+                    .interpolation = field.interpolation.c_str(),
+                    .builtin = field.builtin.c_str(),
+                    .location = field.location,
+                    .has_location = field.has_location ? 1 : 0,
+                });
+            }
+        }
+
+        for (const auto &function : artifact.functions) {
+            if (function.stage == rtsl::StageKind::none) {
+                continue;
+            }
+            entry_views.push_back(rtsl_entry_info{
+                .name = function.name.c_str(),
+                .stage = to_c_stage(function.stage),
+            });
+        }
+    }
 };
 
 struct rtsl_context_t {
@@ -106,7 +193,8 @@ rtsl_module rtslCompileSource(rtsl_context ctx, const char *source, size_t sourc
     try {
         rtsl::CompilerInvocation invocation;
         invocation.source_name = source_name ? source_name : "<memory>";
-        auto artifact = ctx->compiler.compile_source(std::string(source ? source : "", source_size), std::move(invocation));
+        rtsl::Artifact artifact;
+        ctx->compiler.compile_source_to(artifact, std::string_view(source ? source : "", source_size), std::move(invocation));
         if (ctx->compiler.diagnostics().has_error() || artifact.bytes.empty()) {
             set_result(ctx, RTSL_ERROR_COMPILE_FAILED, "compile failed");
             return nullptr;
@@ -135,6 +223,101 @@ rtsl_output_kind rtslModuleGetKind(rtsl_module module) {
 
 void rtslDestroyModule(rtsl_module module) {
     delete module;
+}
+
+rtsl_module rtslLoadModule(rtsl_context ctx, const uint8_t *data, size_t size) {
+    if (!ctx || (!data && size != 0)) {
+        set_result(ctx, RTSL_ERROR_INVALID_ARGUMENT, "invalid load arguments");
+        return nullptr;
+    }
+    try {
+        rtsl::Artifact artifact;
+        if (!rtsl::read_artifact(std::span<const rtsl::u8>(data, size), artifact, &ctx->compiler.diagnostics())) {
+            set_result(ctx, RTSL_ERROR_INVALID_ARGUMENT, "failed to load artifact");
+            return nullptr;
+        }
+        set_result(ctx, RTSL_OK, "ok");
+        return new rtsl_module_t{.artifact = std::move(artifact)};
+    } catch (...) {
+        set_result(ctx, RTSL_ERROR_INTERNAL, "internal error while loading artifact");
+        return nullptr;
+    }
+}
+
+size_t rtslModuleGetUniformCount(rtsl_module module) {
+    if (!module) {
+        return 0;
+    }
+    module->ensure_reflection();
+    return module->uniform_views.size();
+}
+
+int rtslModuleGetUniform(rtsl_module module, size_t index, rtsl_uniform_info *out_info) {
+    if (!module || !out_info) {
+        return 0;
+    }
+    module->ensure_reflection();
+    if (index >= module->uniform_views.size()) {
+        return 0;
+    }
+    *out_info = module->uniform_views[index];
+    return 1;
+}
+
+size_t rtslModuleGetStageVariableCount(rtsl_module module) {
+    if (!module) {
+        return 0;
+    }
+    module->ensure_reflection();
+    return module->stage_views.size();
+}
+
+int rtslModuleGetStageVariable(rtsl_module module, size_t index, rtsl_stage_variable *out_var) {
+    if (!module || !out_var) {
+        return 0;
+    }
+    module->ensure_reflection();
+    if (index >= module->stage_views.size()) {
+        return 0;
+    }
+    *out_var = module->stage_views[index];
+    return 1;
+}
+
+int rtslModuleGetStageLocation(rtsl_module module, const char *payload_type, const char *field_name,
+                               uint32_t *out_location) {
+    if (!module || !payload_type || !field_name || !out_location) {
+        return 0;
+    }
+    module->ensure_reflection();
+    for (const auto &var : module->stage_views) {
+        if (var.has_location && std::strcmp(var.payload_type, payload_type) == 0 &&
+            std::strcmp(var.name, field_name) == 0) {
+            *out_location = var.location;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+size_t rtslModuleGetEntryCount(rtsl_module module) {
+    if (!module) {
+        return 0;
+    }
+    module->ensure_reflection();
+    return module->entry_views.size();
+}
+
+int rtslModuleGetEntry(rtsl_module module, size_t index, rtsl_entry_info *out_entry) {
+    if (!module || !out_entry) {
+        return 0;
+    }
+    module->ensure_reflection();
+    if (index >= module->entry_views.size()) {
+        return 0;
+    }
+    *out_entry = module->entry_views[index];
+    return 1;
 }
 
 rtsl_linker rtslCreateLinker(rtsl_context ctx) {

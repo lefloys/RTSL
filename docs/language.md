@@ -36,13 +36,13 @@ The core punctuators and operators include:
 Modules and visibility: `import`, `export`
 
 Declarations and scopes: `namespace`, `struct`, `using`, `uniform`, `varying`,
-`entry`
+`input`, `output`
 
 Functions and types: `fn`, `const`, `auto`, `void`
 
 Control flow: `if`, `else`, `while`, `do`, `for`, `return`
 
-Varying qualifiers: `clip`, `smooth`, `flat`
+Stage interface qualifiers: `clip`, `smooth`, `flat`, `location`, `builtin`
 
 Resource access qualifiers: `readonly`, `writeonly`
 
@@ -177,35 +177,95 @@ uniform particles {
 The compiler assigns backend binding numbers and records the reflected resource
 layout in artifacts.
 
-## Varyings And Stage Payloads
+## Stage Interfaces
 
-`varying` describes interpolation and stage-interface metadata for a payload
-type:
+Three declarations describe how a payload type crosses a stage boundary:
+
+- `input` — host-supplied stage inputs (e.g. vertex attributes)
+- `varying` — values interpolated from one stage to the next
+- `output` — final stage outputs (e.g. framebuffer attachments)
 
 ```rtsl
+input Point {
+    location(0) position;
+    location(1) uv;
+}
 varying Vertex {
     clip position;
     smooth uv;
     flat material;
-};
+}
+output Fragment {
+    location(0) color;
+}
 ```
 
-`clip` marks clip-space position. `smooth` and `flat` control interpolation.
-The final `rtslp` stores resolved stage-interface metadata for backend lowering.
+Field qualifiers may appear in any order before the field name:
+
+- `smooth` / `flat` control interpolation.
+- `clip` marks the clip-space position; it is delivered through the rasterizer's
+  built-in position slot and consumes no user location. It is a vertex output
+  only and is not readable as an input on later stages.
+- `location(N)` assigns an explicit binding location. Fields without an explicit
+  location are numbered sequentially; built-in fields consume no location.
+- `builtin(name)` routes a field to a named built-in slot.
+
+Assigned locations are recorded in every artifact and are queryable through the
+reflection ABI so hosts can bind inputs and read outputs.
 
 ## Entry Points
 
-`entry fn` marks an executable shader entry point:
+`fn` declarations whose names begin with the stage tag mark executable shader
+entry points. The stage is derived from the function name's leading 4-letter
+tag:
+
+| Tag    | Stage    |
+|--------|----------|
+| `vert` | vertex   |
+| `frag` | fragment |
+| `comp` | compute  |
 
 ```rtsl
-entry fn vert_main(Point p) -> Vertex {
+fn vert_main(Point p) -> Vertex {
     return Vertex(p);
 }
 ```
 
-Entry point stage classification is derived from the signature and stage types,
-then recorded in the linked `rtslp`. The compiler must preserve the authored
-entry name for backend reflection and debugging.
+The compiler keeps the authored function as an ordinary function and generates a
+backend entry wrapper named for the stage (`vert`, `frag`, `comp`). This
+generated stage runtime reads the stage inputs into the source-level input
+payload, calls the authored function, and writes the result across the stage
+boundary using the resolved interface metadata. The authored name is preserved
+for reflection and debugging.
+
+## Stage Builtins
+
+Stage built-ins (`gl_Position`, `gl_PointSize`, `gl_VertexIndex`, `gl_FragCoord`,
+`gl_FragDepth`, the compute invocation ids, …) are delivered through a
+**builtin carrier struct passed by reference** as the entry's first parameter:
+
+```rtsl
+fn vert_main(RtVertex& b, Point p) -> Vertex {
+    b.position = mvp * vec4(p.position, 1.0);  // routes to gl_Position
+    return Vertex(p);
+}
+```
+
+Each stage has a carrier type — `RtVertex`, `RtFragment`, `RtCompute` — whose
+members map to the stage's built-ins. Output members (e.g. `position` →
+`gl_Position`) are written by the shader; input members (e.g. `vertex_index` →
+`gl_VertexIndex`) are read-only. The carrier is passed by reference (`&`), so the
+generated stage runtime copies the used inputs in before the call and the used
+outputs back to the real `gl_*` globals after it. Built-ins the entry never
+touches are not copied.
+
+A linked `rtslp` must contain the entry points required by its program family:
+
+- a **graphics** program must contain `vert` and `frag`;
+- a **compute** program must contain `comp` and no graphics stages.
+
+The linker reports a diagnostic when a program is missing a required stage or
+mixes compute with graphics stages.
 
 ## Compute And Advanced Stages
 
@@ -221,7 +281,7 @@ struct Compute {
 ```
 
 The language model also allows future stage families such as tessellation, mesh,
-and ray tracing through typed entry signatures and stage helper types. These
+and ray tracing through typed function signatures and stage helper types. These
 features must lower through the same RTIR and artifact model.
 
 ## Standard Library And Primitives

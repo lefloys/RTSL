@@ -11,6 +11,24 @@ SemanticModule Sema::analyze(const TranslationUnit &unit) {
     SemanticModule module{.source_name = std::string(sources_.name(unit.file_id))};
     module.structs = unit.structs;
     module.uniforms = unit.uniforms;
+    module.stage_interfaces = unit.stage_interfaces;
+
+    // Assign sequential locations to interface fields that did not request one
+    // explicitly. Built-in slots (e.g. clip position) do not consume a location.
+    for (auto &interface : module.stage_interfaces) {
+        u32 next_location = 0;
+        for (auto &field : interface.fields) {
+            if (!field.builtin.empty()) {
+                continue;
+            }
+            if (field.has_location) {
+                next_location = field.location + 1;
+                continue;
+            }
+            field.location = next_location++;
+            field.has_location = true;
+        }
+    }
     std::unordered_map<std::string, u32> named_sets;
     u32 next_set = 0;
     std::unordered_map<u32, u32> binding_counts;
@@ -42,7 +60,6 @@ SemanticModule Sema::analyze(const TranslationUnit &unit) {
             .return_type = decl.return_type,
             .body_statements = decl.body_statements,
             .exported = decl.exported,
-            .entry = decl.entry,
         });
     }
 

@@ -21,15 +21,15 @@ private:
     [[nodiscard]] bool at_end() const;
 
     Decl parse_declaration();
-    StructDecl parse_struct_decl(bool exported);
     Decl parse_import(bool exported);
-    Decl parse_named_declaration(DeclKind kind, bool exported, bool entry);
+    Decl parse_named_declaration(DeclKind kind, bool exported);
     void parse_function_signature(Decl &decl);
     void parse_function_body(Decl &decl);
     void parse_uniform_scope(const Decl &decl);
+    void parse_stage_interface(const Decl &decl);
     StructField parse_field_declaration();
     std::string collect_type_until(TokenKind stop_a, TokenKind stop_b);
-    void skip_to_declaration_boundary();
+    void skip_to_declaration_boundary(bool consume_right_brace = false);
     void skip_balanced_block();
     std::string append_token_text(std::string statement, const Token &token) const;
     std::string collect_type_tokens_until_identifier();

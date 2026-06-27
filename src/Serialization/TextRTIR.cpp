@@ -1,6 +1,7 @@
 #include "Serialization/TextRTIR.h"
 
 #include "IR/IR.h"
+#include "IR/UniformLowering.h"
 #include "Mangle/Mangler.h"
 
 #include <cctype>
@@ -104,117 +105,6 @@ bool is_identifier_char(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-std::string sanitize_symbol_part(std::string_view part) {
-    std::string sanitized;
-    sanitized.reserve(part.size());
-    for (const char c : part) {
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-            sanitized.push_back(c);
-        } else {
-            sanitized.push_back('_');
-        }
-    }
-    return sanitized;
-}
-
-void append_mangled_part(std::string &name, std::string_view part) {
-    const auto sanitized = sanitize_symbol_part(part);
-    name += std::to_string(sanitized.size());
-    name += sanitized;
-}
-
-u32 stable_uniform_hash(const UniformBinding &uniform) {
-    u32 hash = 2166136261u;
-    const auto add = [&](std::string_view text) {
-        for (const unsigned char c : text) {
-            hash ^= c;
-            hash *= 16777619u;
-        }
-    };
-    add(uniform.scope_name);
-    add("\0");
-    add(uniform.name);
-    add("\0");
-    add(uniform.type);
-    add("\0");
-    add(std::to_string(uniform.set));
-    add("\0");
-    add(std::to_string(uniform.binding));
-    return hash;
-}
-
-std::string hash_suffix(u32 hash) {
-    constexpr char Digits[] = "0123456789abcdef";
-    std::string out = "_h";
-    for (int shift = 28; shift >= 0; shift -= 4) {
-        out.push_back(Digits[(hash >> shift) & 0xfu]);
-    }
-    return out;
-}
-
-std::string uniform_binding_name(const UniformBinding &uniform) {
-    std::string name = "u_";
-    if (!uniform.scope_name.empty()) {
-        append_mangled_part(name, uniform.scope_name);
-        name += "_";
-    }
-    append_mangled_part(name, uniform.name);
-    name += hash_suffix(stable_uniform_hash(uniform));
-    return name;
-}
-
-std::string uniform_block_name(const UniformBinding &uniform) {
-    std::string name = "ub_";
-    if (!uniform.scope_name.empty()) {
-        append_mangled_part(name, uniform.scope_name);
-        name += "_";
-    }
-    append_mangled_part(name, uniform.name);
-    name += hash_suffix(stable_uniform_hash(uniform));
-    return name;
-}
-
-bool is_resource_uniform_type(std::string_view type) {
-    return type == "Sampler2D" || type.starts_with("Buffer<");
-}
-
-bool is_replacement_boundary(std::string_view text, std::size_t pos) {
-    if (pos >= text.size()) {
-        return true;
-    }
-    const char c = text[pos];
-    return !is_identifier_char(c) && c != ':';
-}
-
-std::string replace_symbol(std::string text, std::string_view from, std::string_view to) {
-    std::size_t pos = 0;
-    while ((pos = text.find(from, pos)) != std::string::npos) {
-        if ((pos != 0 && !is_replacement_boundary(text, pos - 1)) ||
-            !is_replacement_boundary(text, pos + from.size())) {
-            pos += from.size();
-            continue;
-        }
-        text.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-    return text;
-}
-
-std::string lower_uniform_references(std::string statement, const std::vector<UniformBinding> &uniforms) {
-    for (const auto &uniform : uniforms) {
-        if (uniform.scope_name.empty()) {
-            statement = replace_symbol(std::move(statement), uniform.name, uniform_binding_name(uniform) + ".value");
-            continue;
-        }
-        const auto source_name = uniform.scope_name + "::" + uniform.name;
-        const auto lowered_name = is_resource_uniform_type(uniform.type)
-                                      ? uniform_binding_name(uniform)
-                                      : uniform_binding_name(uniform) + ".value";
-        statement = replace_symbol(std::move(statement), source_name, lowered_name);
-    }
-    return statement;
-}
-
 std::string lower_uniform_type(std::string_view type) {
     if (type == "Sampler2D") {
         return "sampler2D";
@@ -309,7 +199,7 @@ std::string render_body_op(const IRFunction::BodyOp &op, const std::vector<IRFun
     case IRFunction::BodyOpKind::assign:
         return op.name + " = " + op.value + ";";
     case IRFunction::BodyOpKind::compound_assign:
-        return op.name + " " + op.op + "= " + op.value + ";";
+        return op.name + " " + op.op + "= " + op.value + ";"; // e.g. "color *= tint;"
     case IRFunction::BodyOpKind::call: {
         const auto *constructor = find_constructor(op.callee, functions);
         std::string callee = constructor ? lower_function_name(mangler.mangle_rtsl(*constructor)) : op.callee;
@@ -360,14 +250,37 @@ std::string disassemble_artifact(const Artifact &artifact) {
             out << "} " << binding_name << ";\n\n";
         }
     }
+    for (const auto &interface : artifact.stage_interfaces) {
+        const std::string_view role = interface.role == StageRole::input    ? "input"
+                                      : interface.role == StageRole::output ? "output"
+                                                                            : "varying";
+        out << role << " " << interface.type_name << " {\n";
+        for (const auto &field : interface.fields) {
+            out << "  ";
+            if (!field.interpolation.empty()) {
+                out << field.interpolation << " ";
+            }
+            // 'clip' already implies the built-in position slot, so don't repeat it.
+            if (!field.builtin.empty() && field.interpolation != "clip") {
+                out << "builtin(" << field.builtin << ") ";
+            } else if (field.builtin.empty() && field.has_location) {
+                out << "location(" << field.location << ") ";
+            }
+            out << field.name << ";\n";
+        }
+        out << "};\n\n";
+    }
     if (!artifact.functions.empty()) {
         const Mangler mangler;
         for (std::size_t function_index = 0; function_index < artifact.functions.size(); ++function_index) {
             const auto &function = artifact.functions[function_index];
-            const auto *debug = function_index < artifact.function_debug.size() ? &artifact.function_debug[function_index] : nullptr;
             const auto disassembly_name = lower_function_name(mangler.mangle_rtsl(function));
             const auto owner = member_owner(function.name);
             const bool constructor = is_constructor(function);
+            if (function.stage != StageKind::none) {
+                out << "// " << (function.generated ? "compiler-generated " : "")
+                    << "stage entry: " << stage_entry_name(function.stage) << "\n";
+            }
             out << (constructor ? owner : (function.return_type.empty() ? "void" : function.return_type)) << " "
                 << disassembly_name << "(";
             bool needs_comma = false;
@@ -380,8 +293,7 @@ std::string disassemble_artifact(const Artifact &artifact) {
                     out << ", ";
                 }
                 out << function.parameters[i].type;
-                const std::string parameter_name =
-                    debug && i < debug->parameter_names.size() ? debug->parameter_names[i] : function.parameters[i].name;
+                const std::string parameter_name = function.parameters[i].name;
                 if (!parameter_name.empty()) {
                     out << " " << parameter_name;
                 } else {
@@ -447,12 +359,7 @@ bool assemble_text_rtir(std::string_view text, Artifact &artifact, DiagnosticEng
             continue;
         }
 
-        bool entry = false;
         std::string_view declaration = trimmed;
-        if (declaration.starts_with("entry ")) {
-            entry = true;
-            declaration.remove_prefix(6);
-        }
         if (declaration.ends_with(";")) {
             declaration.remove_suffix(1);
             const auto first_space = declaration.find(' ');
@@ -496,14 +403,7 @@ bool assemble_text_rtir(std::string_view text, Artifact &artifact, DiagnosticEng
                 .symbol_name = {},
                 .parameters = std::move(parameters),
                 .return_type = std::move(return_type),
-                .entry = entry,
             });
-            IRFunctionDebugInfo debug;
-            debug.display_name = module.functions.back().name;
-            for (const auto &parameter : module.functions.back().parameters) {
-                debug.parameter_names.push_back(parameter.name);
-            }
-            module.function_debug.push_back(std::move(debug));
             continue;
         }
 

@@ -13,7 +13,6 @@
 	X(Using, "using") \
 	X(Uniform, "uniform") \
 	X(Varying, "varying") \
-	X(Entry, "entry") \
 	X(Function, "fn") \
 	X(Const, "const") \
 	X(Auto, "auto") \

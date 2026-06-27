@@ -23,23 +23,32 @@ struct IRFunction {
         std::string value;
     };
     std::vector<BodyOp> body_ops;
-    bool entry = false;
+    // Stage of a backend entry point. User functions are StageKind::none; the
+    // compiler-generated backend wrappers (vert/frag/comp) carry the stage.
+    StageKind stage = StageKind::none;
+    // True for compiler-synthesized ABI glue (the generated stage runtime).
+    bool generated = false;
+};
+
+struct StringId {
+    u32 value = 0;
 };
 
 struct IRFunctionDebugInfo {
-    std::string display_name;
-    std::vector<std::string> parameter_names;
+    StringId display_name;
+    std::vector<StringId> parameter_names;
 };
 
 struct IRModule {
     std::string source_name;
     std::vector<StructDecl> structs;
     std::vector<UniformBinding> uniforms;
+    std::vector<StageInterface> stage_interfaces;
     std::vector<IRFunction> functions;
     std::vector<IRFunctionDebugInfo> function_debug;
 };
 
-[[nodiscard]] IRModule lower_to_ir(const SemanticModule &module);
+[[nodiscard]] IRModule lower_to_ir(const SemanticModule &module, DiagnosticEngine *diagnostics = nullptr);
 [[nodiscard]] bool verify_ir(const IRModule &module);
 
 } // namespace rtsl

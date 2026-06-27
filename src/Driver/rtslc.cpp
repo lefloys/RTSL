@@ -1,6 +1,8 @@
 #include "rtsl.h"
 
+#include "Backend/GlslBackend.h"
 #include "Basic/Diagnostics.h"
+#include "Compiler/Compiler.h"
 #include "Serialization/Artifact.h"
 #include "Serialization/TextRTIR.h"
 
@@ -45,12 +47,22 @@ void print_engine_diagnostics(const rtsl::DiagnosticEngine &diagnostics) {
     }
 }
 
+bool write_bytes(const std::string &path, const std::vector<rtsl::u8> &bytes) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        return false;
+    }
+    output.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return output.good();
+}
+
 void usage() {
     std::cerr << "usage:\n"
               << "  rtslc -c input.rtsl -o output.rtslo\n"
               << "  rtslc --link-program input.rtslo... -o output.rtslp\n"
               << "  rtslc --dump-rtir input.rtslo\n"
-              << "  rtslc --assemble-rtir input.rtir -o output.rtslo\n";
+              << "  rtslc --assemble-rtir input.rtir -o output.rtslo\n"
+              << "  rtslc --emit-glsl input.rtslp -o output   (writes output.vert, output.frag, ...)\n";
 }
 
 } // namespace
@@ -65,6 +77,7 @@ int main(int argc, char **argv) {
     bool link_program = false;
     bool dump_rtir = false;
     bool assemble_rtir = false;
+    bool emit_glsl = false;
     std::string output;
     std::vector<std::string> inputs;
 
@@ -78,6 +91,8 @@ int main(int argc, char **argv) {
             dump_rtir = true;
         } else if (arg == "--assemble-rtir") {
             assemble_rtir = true;
+        } else if (arg == "--emit-glsl") {
+            emit_glsl = true;
         } else if (arg == "-o" && i + 1 < argc) {
             output = argv[++i];
         } else {
@@ -85,7 +100,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    const int mode_count = (compile ? 1 : 0) + (link_program ? 1 : 0) + (dump_rtir ? 1 : 0) + (assemble_rtir ? 1 : 0);
+    const int mode_count = (compile ? 1 : 0) + (link_program ? 1 : 0) + (dump_rtir ? 1 : 0) +
+                           (assemble_rtir ? 1 : 0) + (emit_glsl ? 1 : 0);
     if (inputs.empty() || mode_count != 1 || (!dump_rtir && output.empty())) {
         usage();
         return 1;
@@ -106,15 +122,23 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        rtsl_module module = rtslCompileSource(ctx, reinterpret_cast<const char *>(source.data()), source.size(), inputs.front().c_str());
-        if (!module) {
-            print_diagnostics(ctx);
+        rtsl::CompilerInstance compiler;
+        rtsl::CompilerInvocation invocation{.source_name = inputs.front()};
+        rtsl::Artifact artifact;
+        std::cerr << "driver compile begin\n";
+        compiler.compile_source_to(artifact, std::string_view(reinterpret_cast<const char *>(source.data()), source.size()),
+                                   std::move(invocation));
+        std::cerr << "driver compile end bytes=" << artifact.bytes.size() << "\n";
+        if (compiler.diagnostics().has_error() || artifact.bytes.empty()) {
+            print_engine_diagnostics(compiler.diagnostics());
             exit_code = 1;
-        } else if (!write_file(output, rtslModuleGetBytecode(module))) {
+        } else if (!write_bytes(output, artifact.bytes)) {
+            std::cerr << "driver write failed\n";
             std::cerr << "failed to write " << output << '\n';
             exit_code = 1;
+        } else {
+            std::cerr << "driver write ok\n";
         }
-        rtslDestroyModule(module);
     } else if (link_program) {
         rtsl_linker linker = rtslCreateLinker(ctx);
         for (const auto &input_path : inputs) {
@@ -161,6 +185,33 @@ int main(int argc, char **argv) {
         } else if (!write_file(output, rtsl_blob{artifact.bytes.data(), artifact.bytes.size()})) {
             std::cerr << "failed to write " << output << '\n';
             exit_code = 1;
+        }
+    } else if (emit_glsl) {
+        const auto bytes = read_file(inputs.front());
+        rtsl::Artifact artifact;
+        rtsl::DiagnosticEngine diagnostics;
+        if (bytes.empty() || !rtsl::read_artifact(bytes, artifact, &diagnostics)) {
+            std::cerr << "failed to read artifact " << inputs.front() << '\n';
+            print_engine_diagnostics(diagnostics);
+            exit_code = 1;
+        } else {
+            // Vulkan GLSL is one file per stage, so split the module into a
+            // separate <output><ext> file for each stage entry point.
+            const auto files = rtsl::emit_vulkan_glsl(artifact);
+            if (files.empty()) {
+                std::cerr << "artifact has no stage entry points to emit\n";
+                exit_code = 1;
+            }
+            for (const auto &file : files) {
+                const std::string path = output + file.extension;
+                std::ofstream stream(path, std::ios::binary);
+                if (!stream || !(stream << file.source)) {
+                    std::cerr << "failed to write " << path << '\n';
+                    exit_code = 1;
+                } else {
+                    std::cerr << "wrote " << path << '\n';
+                }
+            }
         }
     }
 

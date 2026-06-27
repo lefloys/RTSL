@@ -43,6 +43,7 @@ std::string_view token_spelling(TokenKind kind) {
     case TokenKind::tilde: return "~";
     case TokenKind::arrow: return "->";
     case TokenKind::colon_colon: return "::";
+    case TokenKind::colon: return ":";
     case TokenKind::left_paren: return "(";
     case TokenKind::right_paren: return ")";
     case TokenKind::left_brace: return "{";
@@ -81,8 +82,6 @@ std::vector<Token> Lexer::lex() {
             tokens.push_back(lex_identifier_or_keyword());
         } else if (std::isdigit(static_cast<unsigned char>(c))) {
             tokens.push_back(lex_number());
-        } else if (c == '"') {
-            tokens.push_back(lex_string());
         } else {
             tokens.push_back(lex_punctuation());
         }
@@ -158,26 +157,6 @@ Token Lexer::lex_number() {
     return make_token(is_float ? TokenKind::float_literal : TokenKind::integer_literal, begin, cursor_);
 }
 
-Token Lexer::lex_string() {
-    const auto begin = cursor_;
-    ++cursor_;
-    while (!at_end() && peek() != '"') {
-        if (peek() == '\\' && !at_end(1)) {
-            cursor_ += 2;
-        } else {
-            ++cursor_;
-        }
-    }
-
-    if (at_end()) {
-        diagnose(begin, "unterminated string literal");
-        return make_token(TokenKind::invalid, begin, cursor_);
-    }
-
-    ++cursor_;
-    return make_token(TokenKind::string_literal, begin, cursor_);
-}
-
 Token Lexer::lex_punctuation() {
     const auto begin = cursor_;
     const char c = peek();
@@ -201,34 +180,13 @@ Token Lexer::lex_punctuation() {
     if (c == '-' && n == '>') return two(TokenKind::arrow);
     if (c == ':' && n == ':') return two(TokenKind::colon_colon);
 
-    switch (c) {
-    case '+': return one(TokenKind::plus);
-    case '-': return one(TokenKind::minus);
-    case '*': return one(TokenKind::star);
-    case '/': return one(TokenKind::slash);
-    case '%': return one(TokenKind::percent);
-    case '=': return one(TokenKind::equal);
-    case '<': return one(TokenKind::less);
-    case '>': return one(TokenKind::greater);
-    case '!': return one(TokenKind::bang);
-    case '&': return one(TokenKind::amp);
-    case '|': return one(TokenKind::pipe);
-    case '^': return one(TokenKind::caret);
-    case '~': return one(TokenKind::tilde);
-    case '(': return one(TokenKind::left_paren);
-    case ')': return one(TokenKind::right_paren);
-    case '{': return one(TokenKind::left_brace);
-    case '}': return one(TokenKind::right_brace);
-    case '[': return one(TokenKind::left_bracket);
-    case ']': return one(TokenKind::right_bracket);
-    case ',': return one(TokenKind::comma);
-    case ';': return one(TokenKind::semicolon);
-    case '.': return one(TokenKind::dot);
-    default:
-        diagnose(begin, "invalid character in source");
-        ++cursor_;
-        return make_token(TokenKind::invalid, begin, cursor_);
-    }
+#define RTSL_PUNCTUATION_MATCH(name, spelling) if (c == spelling) return one(TokenKind::name);
+    RTSL_PUNCTUATION_TOKENS(RTSL_PUNCTUATION_MATCH)
+#undef RTSL_PUNCTUATION_MATCH
+
+    diagnose(begin, "invalid character in source");
+    ++cursor_;
+    return make_token(TokenKind::invalid, begin, cursor_);
 }
 
 Token Lexer::make_token(TokenKind kind, std::size_t begin, std::size_t end) const {

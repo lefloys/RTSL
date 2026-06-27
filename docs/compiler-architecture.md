@@ -108,6 +108,15 @@ The C ABI should expose the same logical pipeline:
 - add object, library, or module blobs
 - link to library or program outputs
 - read artifact blobs and diagnostic results
+- load an existing artifact blob for reflection (`rtslLoadModule`)
+- reflect a module's uniforms, stage interface variables, and entry points
+
+Reflection is available on any loaded artifact (`rtslo`, `rtslm`, `rtsll`,
+`rtslp`). Uniform queries report the scope, name, type, set, binding, and the
+mangled backend binding name. Stage-interface queries report each input/varying/
+output field with its role, payload type, interpolation, built-in slot, and
+assigned location. Entry queries report the generated 4-letter stage entry
+names and their stages.
 
 The ABI should not expose C++ types, STL containers, exceptions, or ownership
 that depends on C++ destructors in user code.

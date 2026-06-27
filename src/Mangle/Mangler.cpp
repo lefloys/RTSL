@@ -100,7 +100,7 @@ std::string Mangler::mangle_glsl_from_rtsl(std::string_view rtsl_mangled_name) c
 }
 
 std::string Mangler::mangle_rtsl(const IRFunction &function) const {
-    if (function.entry) {
+    if (function.stage != StageKind::none) {
         return function.name;
     }
 
@@ -127,7 +127,7 @@ std::string Mangler::mangle_rtsl(const IRFunction &function) const {
 }
 
 std::string Mangler::mangle_for_glsl(const IRFunction &function) const {
-    if (function.entry) {
+    if (function.stage != StageKind::none) {
         return sanitize_identifier(function.name);
     }
     return mangle_glsl_from_rtsl(mangle_rtsl(function));

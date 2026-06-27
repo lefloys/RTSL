@@ -10,47 +10,45 @@ uniform albedo {
 struct Point {
     vec3 position;
     vec2 uv;
-};      
-
+};
 
 struct Vertex {
-    Vertex(Point p);
+    fn Vertex(Point p);
+
     vec4 position;
     vec2 uv;
     u32 material;
-};
+
+}
+
+fn Vertex::Vertex(Point p) {
+    position = mvp * vec4(p.position, 1.0);
+    uv = p.uv;
+    material = 0;
+}
+
 varying Vertex {
     clip position;
     smooth uv;
     flat material;
 };
 struct Fragment {
-    Fragment(Vertex v);
+    fn Fragment(Vertex v);
+
     vec4 color;
-};
-
-
-fn Vertex::Vertex(Point p) {
-    f32 z = p.position.z;
-    position = mvp * vec4(p.position, 1.0);
-    uv = p.uv;
-    material = 0;
 }
+
 fn Fragment::Fragment(Vertex v) {
-    color = sample(albedo::texture, v.uv);
-    color *= albedo::tint;
+    color = sample(albedo::texture, v.uv) * albedo::tint;
 }
 
-entry fn vert_main(Point p) -> Vertex {
+
+fn vert_main(vert_globals g, Point p) -> Vertex {
     return Vertex(p);
 }
-entry fn frag_main(Vertex v) -> Fragment {
+
+fn frag_main(frag_globals g, Vertex v) -> Fragment {
     return Fragment(v);
-}
-entry fn geom_main(Triangle<Vertex> triangle) -> Geometry<Triangle<Vertex>, 1> {
-    Geometry<Triangle<Vertex>, 1> out;
-    out.emit(triangle);
-    return out;
 }
 
 

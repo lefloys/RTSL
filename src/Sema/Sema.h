@@ -15,7 +15,6 @@ struct SemanticSymbol {
     std::string return_type;
     std::vector<std::string> body_statements;
     bool exported = false;
-    bool entry = false;
 };
 
 struct SemanticModule {
@@ -23,6 +22,7 @@ struct SemanticModule {
     std::vector<SemanticSymbol> symbols;
     std::vector<StructDecl> structs;
     std::vector<UniformBinding> uniforms;
+    std::vector<StageInterface> stage_interfaces;
 };
 
 class Sema {
