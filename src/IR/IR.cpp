@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -666,6 +667,30 @@ private:
     }
 
     void lower_decl(const std::string &type_name, const std::string &local_name, const Decl::Expr &init) {
+        // Inside a constructor body, `position = vec4(...)` parses as a
+        // declaration where the parser fills both the "type" and "name" with
+        // "position". Without intervention we'd allocate a junk Variable with
+        // pointer-to-unknown-type, and the CompositeConstruct synthesized by
+        // emit_constructor_return would never see the computed value. Detect
+        // the constructor-owned field write here and record it directly.
+        if (in_constructor() && init.kind != Decl::Expr::Kind::unknown) {
+            const TypeInfo *info = types_.info_by_id(ctor_owner_type_id_);
+            const bool name_matches_owner_field = [&]() {
+                if (!info) return false;
+                for (const auto &member : info->members) {
+                    if (member.first == local_name) return true;
+                }
+                return false;
+            }();
+            const bool looks_like_field_write =
+                name_matches_owner_field &&
+                (type_name.empty() || type_name == local_name || !types_.find(type_name));
+            if (looks_like_field_write) {
+                const Value v = lower_expr(init);
+                if (record_constructor_field(local_name, v.id)) return;
+            }
+        }
+
         const IRId type_id = types_.find(type_name);
         const IRId ptr_ty = types_.pointer_to(type_id, StorageClass::Function);
         IRInstruction var;
@@ -996,10 +1021,24 @@ private:
                 }
             }
         }
-        // Global uniform.
-        if (const auto vit = uniform_var_ids_.find(name); vit != uniform_var_ids_.end()) {
+        // Global uniform. The parser captures expression text into Decl::Expr
+        // before any uniform-name mangling, so `transform` reaches us as its
+        // source identifier rather than `u_..._h..`. Translate it here by
+        // matching against the uniform table; the mangled form is also accepted
+        // so that downstream code paths that go through lower_uniform_references
+        // continue to work.
+        std::string lookup_name = name;
+        if (uniform_var_ids_.find(lookup_name) == uniform_var_ids_.end()) {
+            for (const auto &u : uniforms_) {
+                if (u.name == name && (u.is_anonymous || u.scope_name.empty())) {
+                    lookup_name = uniform_binding_name(u);
+                    break;
+                }
+            }
+        }
+        if (const auto vit = uniform_var_ids_.find(lookup_name); vit != uniform_var_ids_.end()) {
             const IRId var_id = vit->second;
-            const IRId ptr_ty = uniform_var_type_ids_.at(name);
+            const IRId ptr_ty = uniform_var_type_ids_.at(lookup_name);
             // Load the value through the pointer.
             const TypeInfo *info_ptr = nullptr;
             (void)info_ptr;
@@ -1557,9 +1596,11 @@ IRModule lower_to_ir(const SemanticModule &module, DiagnosticEngine *diagnostics
         lowerer.begin_entry_block();
         lowerer.emit_function_parameters(parameters);
         for (const auto &statement : symbol.body_statements) {
-            Decl::BodyStatement lowered_statement = statement;
-            lowered_statement.text = lower_uniform_references(statement.text, ir.uniforms);
-            lowerer.lower_statement(lowered_statement);
+            // Uniform identifiers in body expressions are resolved by name
+            // inside FunctionLowerer::emit_name against the uniforms table;
+            // no text-level mangling is needed here because the parser builds
+            // a Decl::Expr ahead of any text substitution we could do.
+            lowerer.lower_statement(statement);
         }
         if (is_constructor) {
             lowerer.emit_constructor_return();

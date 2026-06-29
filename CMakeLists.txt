@@ -16,8 +16,7 @@ endif()
 #                        semantics, IR, serialization helpers, mangling
 #   rtsl-compiler     -> source -> artifact compilation
 #   rtsl-linker       -> object/library -> program/library linking
-#   rtsl-emitter-spirv-> RTSLP -> SPIR-V emission
-#   rtsl-emitter-hlsl -> RTSLP -> HLSL emission
+#   rtsl-backends     -> SPIR-V / HLSL emission backends
 #   rtsl              -> public C API façade over compiler/linker/core
 
 set(_rtsl_src "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -25,6 +24,12 @@ set(_rtsl_src "${CMAKE_CURRENT_SOURCE_DIR}/src")
 function(_rtsl_configure_lib target)
     target_compile_features(${target} PUBLIC cxx_std_23)
     set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    if(MSVC)
+        set_target_properties(${target} PROPERTIES
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        )
+        target_compile_options(${target} PRIVATE /FS)
+    endif()
     target_include_directories(${target}
         PUBLIC
             "${_rtsl_src}"
@@ -47,20 +52,13 @@ add_library(rtsl-core STATIC
 )
 _rtsl_configure_lib(rtsl-core)
 
-add_library(rtsl-emitter-spirv STATIC
-    ${_rtsl_src}/Emit/SpirvEmitter.cpp
-)
-_rtsl_configure_lib(rtsl-emitter-spirv)
-target_include_directories(rtsl-emitter-spirv PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/backend-tools/include" "${CMAKE_CURRENT_SOURCE_DIR}/../bindings/c/include")
-if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET AND NOT VCPKG_TARGET_TRIPLET STREQUAL "")
-    target_include_directories(rtsl-emitter-spirv PRIVATE "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include")
-endif()
-target_link_libraries(rtsl-emitter-spirv PUBLIC rtsl-core)
-
 # Linker: combines compiled objects/libraries into rtsll or rtslp.
 add_library(rtsl-linker STATIC ${_rtsl_src}/Link/Linker.cpp)
 _rtsl_configure_lib(rtsl-linker)
 target_link_libraries(rtsl-linker PUBLIC rtsl-core)
+
+# Backend emitters live under RTSL, not the runtime.
+add_subdirectory(backends)
 
 # Compiler orchestrator: drives source -> rtslo / rtslm.
 add_library(rtsl-compiler STATIC ${_rtsl_src}/Compiler/Compiler.cpp)
@@ -75,7 +73,6 @@ target_link_libraries(rtsl
         rtsl-compiler
         rtsl-linker
         rtsl-core
-        rtsl-emitter-spirv
 )
 
 add_executable(rtslc ${_rtsl_src}/Driver/rtslc.cpp)
@@ -89,6 +86,12 @@ add_executable(rtsl-tests tests/rtsl_tests.cpp)
 target_link_libraries(rtsl-tests PRIVATE rtsl)
 target_compile_features(rtsl-tests PRIVATE cxx_std_23)
 set_target_properties(rtsl-tests PROPERTIES CXX_EXTENSIONS OFF)
+
+if(MSVC)
+    set_target_properties(rtslc rtsl-tests PROPERTIES
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+endif()
 
 enable_testing()
 add_test(NAME rtsl-tests COMMAND rtsl-tests)
